@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ====================================================
-# CDT Traffic Manager V2.0 (GitHub 纯净版)
+# CDT Traffic Manager V2.1
 # 命令名称: cdt
 # 仓库地址: https://github.com/starshine369/CDT-ECS
 # ====================================================
@@ -12,9 +12,17 @@ BIN_FILE="/usr/local/bin/cdt"
 
 # 1. 确保 root 权限
 if [ "$EUID" -ne 0 ]; then
-  echo -e "\033[31m[!] 请使用 root 权限运行此命令！\033[0m"
-  exit 1
+    echo -e "\033[31m[!] 请使用 root 权限运行此命令！\033[0m"
+    exit 1
 fi
+
+set_conf() {
+    if grep -q "^$1=" "$CONFIG_FILE" 2>/dev/null; then
+        sed -i "s/^$1=.*/$1=\"$2\"/" "$CONFIG_FILE"
+    else
+        echo "$1=\"$2\"" >> "$CONFIG_FILE"
+    fi
+}
 
 # ==========================================
 # Core 1: Background Monitor (Cron)
@@ -48,9 +56,20 @@ if [ "$1" == "check" ]; then
 
     # 只有当总流量大于 0 且超标时才关机，防止初始化 bug 误杀
     if [ "$TOTAL" -gt 0 ] && [ "$TOTAL" -ge "$LIMIT_BYTES" ]; then
+        
+        # 关机前日志自洁 (上限 1MB)
+        if [ -f "$LOG_FILE" ]; then
+            CURRENT_SIZE=$(stat -c%s "$LOG_FILE" 2>/dev/null || echo 0)
+            if [ "$CURRENT_SIZE" -gt 1048576 ]; then
+                tail -n 100 "$LOG_FILE" > "${LOG_FILE}.tmp" && mv "${LOG_FILE}.tmp" "$LOG_FILE"
+            fi
+        fi
+
         echo "$(date) - [ALERT] 流量超标！当前使用: $TOTAL Bytes, 限制: $LIMIT_BYTES Bytes. 执行紧急关机..." >> "$LOG_FILE"
         sync
-        /sbin/shutdown -h now
+        
+        # 双重关机指令，防止某些系统环境缺失 shutdown
+        /sbin/shutdown -h now || systemctl poweroff
     fi
     exit 0
 fi
@@ -62,13 +81,13 @@ install_system() {
     # 防止代码裸贴崩溃
     if [[ ! -f "$0" || "$0" == "bash" || "$0" == "sh" || "$0" == "-bash" ]]; then
         echo -e "\033[31m[!] 错误：为保证完整性，请使用 wget 下载文件后执行！\033[0m"
-        echo -e "指令：wget -O cdt.sh https://raw.githubusercontent.com/starshine369/CDT-ECS/main/cdt.sh && bash cdt.sh"
+        echo -e "指令：wget -O cdt.sh https://ghproxy.net/https://raw.githubusercontent.com/starshine369/CDT-ECS/main/cdt.sh && bash cdt.sh"
         exit 1
     fi
 
     clear
     echo "======================================================"
-    echo "      [*] 正在部署 CDT 流量防爆闸 (GitHub 版)..."
+    echo "      [*] 正在部署 CDT 流量防爆闸 (GitHub 版 V2.1)..."
     echo "======================================================"
     
     # 智能依赖检测与安装
@@ -119,7 +138,7 @@ install_system() {
 
     echo "[*] 请选择流量重置周期:"
     echo "   [1] 每月固定日期重置 (默认)"
-    echo "   [2] 从不重置 (累计消耗)"
+    echo "   [2] 从不重置 (全局累计消耗)"
     read -p ">>> 请输入序号 (默认1): " RESET_MODE
     RESET_MODE=${RESET_MODE:-1}
 
@@ -193,7 +212,7 @@ show_dashboard() {
 
     clear
     echo "======================================================"
-    echo "              CDT 流量防爆控制台 V2.0"
+    echo "              CDT 流量防爆控制台 V2.1"
     echo "======================================================"
     echo " [*] 监控网卡   : $IFACE"
     echo " [*] 统计周期   : $MODE_STR"
@@ -204,9 +223,10 @@ show_dashboard() {
     echo " (TX) 累计出站   : $TX_GB GB"
     echo " (=>) 计费总用量 : $USED_GB GB ($PERCENT%)"
     echo "======================================================"
-    echo " [1] 修改 关机阈值"
-    echo " [2] 修改 计费规则 (相加/取大/单向)"
-    echo " [3] 修改 监控网卡"
+    echo " [1] 修改 关机流量阈值"
+    echo " [2] 修改 流量计费规则 (相加/取大/单向)"
+    echo " [3] 修改 统计周期与结算日 (每月/全局)"
+    echo " [4] 修改 监听网卡名称"
     echo " [88] 彻底 卸载防爆闸"
     echo " [0] 退出 面板"
     echo "======================================================"
@@ -216,7 +236,7 @@ show_dashboard() {
         1)
             read -p "请输入新的关机流量上限 (GB): " NEW_LIMIT
             if [[ "$NEW_LIMIT" =~ ^[0-9]+$ ]]; then
-                sed -i "s/^LIMIT_GB=.*/LIMIT_GB=\"$NEW_LIMIT\"/" "$CONFIG_FILE"
+                set_conf "LIMIT_GB" "$NEW_LIMIT"
                 echo "[OK] 修改成功！"
             else
                 echo "[!] 错误: 请输入纯数字！"
@@ -224,18 +244,39 @@ show_dashboard() {
             sleep 1; show_dashboard ;;
         2)
             echo "1) 相加  2) 取大  3) 仅出站  4) 仅入站"
-            read -p "请选择新模式: " NEW_CALC
+            read -p "请选择新计费模式 [1-4]: " NEW_CALC
             if [[ "$NEW_CALC" =~ ^[1-4]$ ]]; then
-                sed -i "s/^CALC_MODE=.*/CALC_MODE=\"$NEW_CALC\"/" "$CONFIG_FILE"
+                set_conf "CALC_MODE" "$NEW_CALC"
                 echo "[OK] 修改成功！"
             else
                 echo "[!] 错误: 选择无效！"
             fi
             sleep 1; show_dashboard ;;
         3)
+            echo "1) 每月固定日期重置  2) 全局累计 (从不重置)"
+            read -p "请选择统计周期 [1-2]: " NEW_RMODE
+            if [[ "$NEW_RMODE" == "1" ]]; then
+                set_conf "RESET_MODE" "1"
+                read -p "请输入每月结算日 (1-28): " NEW_RDAY
+                if [[ "$NEW_RDAY" =~ ^[0-9]+$ ]] && [ "$NEW_RDAY" -ge 1 ] && [ "$NEW_RDAY" -le 28 ]; then
+                    set_conf "RESET_DAY" "$NEW_RDAY"
+                    sed -i "s/^MonthRotate .*/MonthRotate $NEW_RDAY/" /etc/vnstat.conf 2>/dev/null
+                    systemctl restart vnstat > /dev/null 2>&1
+                    echo "[OK] 统计周期已修改为每月 $NEW_RDAY 号重置！"
+                else
+                    echo "[!] 错误: 日期输入无效！"
+                fi
+            elif [[ "$NEW_RMODE" == "2" ]]; then
+                set_conf "RESET_MODE" "2"
+                echo "[OK] 统计周期已修改为全局累计！"
+            else
+                echo "[!] 错误: 选择无效！"
+            fi
+            sleep 1; show_dashboard ;;
+        4)
             read -p "请输入新的外网网卡名称 (例如 eth0): " NEW_IFACE
             if [ -n "$NEW_IFACE" ]; then
-                sed -i "s/^IFACE=.*/IFACE=\"$NEW_IFACE\"/" "$CONFIG_FILE"
+                set_conf "IFACE" "$NEW_IFACE"
                 echo "[OK] 网卡已修改！"
             fi
             sleep 1; show_dashboard ;;
