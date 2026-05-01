@@ -25,3 +25,13 @@
 
 ```bash
 wget -O cdt.sh https://ghproxy.net/https://raw.githubusercontent.com/starshine369/CDT-ECS/main/cdt.sh && bash cdt.sh
+```
+
+## 🎮 控制台使用说明
+
+安装完毕后，CDT 会作为 systemd 守护进程在后台静默运转。
+您在任何目录下只需输入以下快捷命令，即可唤醒全中文指挥台：
+
+```bash
+cdt
+```
